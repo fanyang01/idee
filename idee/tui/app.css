@@ -1,0 +1,47 @@
+/* codemate/tui/app.css */
+
+Screen {
+    /* Use textual's layout system */
+    layout: vertical;
+}
+
+Header {
+    dock: top;
+    height: 1; /* Compact header */
+}
+
+Footer {
+    dock: bottom;
+    height: 1; /* Compact footer */
+}
+
+#main-container {
+    /* Take remaining space */
+    width: 100%;
+    height: 1fr;
+    border: thick $accent; /* Add a border around main area */
+}
+
+#conversation-log {
+    /* Take most space, leave room for input */
+    height: 1fr;
+    border-bottom: thick $accent; /* Separator line */
+    margin: 0;
+    padding: 1;
+    /* Enable scrolling */
+    overflow-y: scroll;
+}
+
+#user-input {
+    dock: bottom;
+    height: 3; /* Input takes 3 lines (includes border) */
+    border-top: thick $accent;
+    padding: 0 1; /* Padding inside input area */
+}
+
+/* Style panels within the log */
+/* ConversationLog Panel {
+    margin-bottom: 1;
+} */
+
+

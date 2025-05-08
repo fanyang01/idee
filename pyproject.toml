@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "idee"
+version = "0.1.0"
+authors = [
+  { name="Your Name", email="your.email@example.com" }, # Replace with your details
+]
+description = "An agentic CLI coding assistant using LLM tool calling."
+readme = "README.md"
+requires-python = ">=3.9" # Asyncio improvements and type hinting features
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License", # Or choose another license
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+    "Topic :: Software Development",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "openai>=1.70",         # For OpenAI APIs (includes new Responses API)
+    "google-genai>=1.9",    # For Gemini API
+    "anthropic>=0.49",      # For Claude API
+    "textual>=0.60",        # For TUI
+    "rich>=13.0",           # Textual dependency, good for nice output
+    "python-dotenv>=1.0",   # For loading API keys from .env
+    "duckdb>=0.9",          # For history database
+    "pyyaml>=6.0",          # For potential config files
+    "asyncio",
+    "typing_extensions",    # For newer typing features if needed
+]
+
+[project.urls]
+"Homepage" = "https://github.com/yourusername/idee" # Replace with your repo URL
+"Bug Tracker" = "https://github.com/yourusername/idee/issues" # Replace
+
+[project.scripts]
+idee = "idee.main:run" # Defines the CLI command
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["idee*"]
+
