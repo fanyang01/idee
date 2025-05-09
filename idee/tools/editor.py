@@ -3,7 +3,7 @@ import os
 import re
 from typing import Dict, Any, Optional, List
 
-from .base import BaseTool, ToolError
+from .base import BaseTool, ToolError, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +142,7 @@ class TextEditorTool(BaseTool):
             raise ToolError(f"An unexpected error occurred during search/replace: {e}")
 
 
-    async def run(self, action: str, file_path: str, search_pattern: Optional[str] = None, replace_string: Optional[str] = None, max_lines: int = 100) -> Any:
+    async def run(self, action: str, file_path: str, search_pattern: Optional[str] = None, replace_string: Optional[str] = None, max_lines: int = 100) -> ToolResult:
         """
         Executes the specified file action.
 
@@ -154,20 +154,30 @@ class TextEditorTool(BaseTool):
             max_lines: Max lines to return for read_file.
 
         Returns:
-            File content string for 'read_file', or a status dictionary for 'search_replace'.
+            ToolResult containing file content for 'read_file', or status info for 'search_replace'.
         """
         if not file_path:
-             raise ToolError("File path must be provided.")
+            # This is an input validation error. Raising ToolError here is fine as it indicates
+            # a problem with how the tool is being used, which the agent should catch.
+            raise ToolError("File path must be provided.")
+
+        # Removed the outer try/except ToolError and general Exception blocks.
+        # Specific ToolErrors raised by helper methods will propagate up.
+        # Other unexpected exceptions will also propagate and be handled by the agent's caller.
 
         if action == "read_file":
-            return await self._read_file(file_path, max_lines)
+            content = await self._read_file(file_path, max_lines)
+            return ToolResult(output=content)
         elif action == "search_replace":
             if search_pattern is None or replace_string is None:
+                # Input validation for action-specific parameters.
                 raise ToolError("Both 'search_pattern' and 'replace_string' are required for 'search_replace' action.")
-            return await self._search_replace(file_path, search_pattern, replace_string)
+            result = await self._search_replace(file_path, search_pattern, replace_string)
+            return ToolResult(output=str(result))
         else:
-            # This case should ideally be prevented by schema validation if using Pydantic,
-            # or by the LLM adhering to the enum definition.
+            # This case should ideally be prevented by schema validation (e.g., Pydantic enum)
+            # or by the LLM adhering to the enum definition in the tool's description.
+            # Raising a ToolError is appropriate if an invalid action is somehow passed.
             logger.warning(f"Invalid action '{action}' requested for text_editor tool.")
             raise ToolError(f"Invalid action specified: {action}. Must be 'read_file' or 'search_replace'.")
 

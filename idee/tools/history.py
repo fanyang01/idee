@@ -1,8 +1,9 @@
 import asyncio
+import json
 import logging
 from typing import Dict, Any, List
 
-from .base import BaseTool, ToolError
+from .base import BaseTool, ToolError, ToolResult
 from ..core.history_db import HistoryDB
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,7 @@ class HistoryTool(BaseTool):
         self.history_db = history_db
         super().__init__() # Call parent __init__ if it exists/is needed
 
-    async def run(self, search_query: str, max_results: int = 10) -> List[Dict[str, Any]]:
+    async def run(self, search_query: str, max_results: int = 10) -> ToolResult:
         """
         Queries the history database using the injected instance.
 
@@ -73,27 +74,22 @@ class HistoryTool(BaseTool):
              # but good for safety if the connection could be closed externally.
              raise ToolError("History database connection is not available.")
 
-        try:
-            # Run the synchronous query method in a thread pool executor
-            loop = asyncio.get_running_loop()
-            results = await loop.run_in_executor(
-                None, # Use default executor (ThreadPoolExecutor)
-                self.history_db.query_history, # Use the injected instance's method
-                search_query,
-                'default', # Assuming single session for now
-                max_results
-            )
-            # No need to close the connection here - the Agent manages it.
+        # Run the synchronous query method in a thread pool executor
+        loop = asyncio.get_running_loop()
+        results = await loop.run_in_executor(
+            None, # Use default executor (ThreadPoolExecutor)
+            self.history_db.query_history, # Use the injected instance's method
+            search_query,
+            'default', # Assuming single session for now
+            max_results
+        )
+        # No need to close the connection here - the Agent manages it.
 
-            if not results:
-                 # Return a more informative message instead of just an empty list
-                 return [{"message": f"No history found matching query: '{search_query}'"}]
+        if not results:
+             # Return a more informative message instead of just an empty list
+             # This is not an error, but a valid outcome of a search.
+             return ToolResult(output=f"No history found matching query: '{search_query}'")
 
-            return results
-
-        except Exception as e:
-            logger.exception(f"Error querying history with query '{search_query}': {e}")
-            # Do not close the connection here.
-            raise ToolError(f"Failed to query history: {e}")
+        return ToolResult(output=json.dumps(results, indent=2))
 
 

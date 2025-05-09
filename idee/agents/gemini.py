@@ -5,7 +5,6 @@ import json
 import time
 from typing import List, Dict, Any, Optional, Tuple
 
-# Import Google Generative AI libraries
 from google import genai
 from google.genai.types import (
     Content,
@@ -13,14 +12,13 @@ from google.genai.types import (
     ContentOrDict,
     UserContent,
     ModelContent,
-    Tool as GeminiTool, # Alias to avoid confusion with BaseTool
+    Tool,
     FunctionDeclaration,
     Part,
     FunctionCall,
     FunctionResponse,
     ToolConfig,
     FunctionCallingConfig,
-    GenerationConfig,
     GenerateContentConfig,
     GenerateContentResponse,
 )
@@ -28,12 +26,9 @@ from google.genai.types import (
 from .base import BaseAgent
 from .templates import format_conversation_summary
 from .types import (
-    AgentConfig,
     GeminiAgentConfig,
-    UnifiedMessage,
     UnifiedToolCall,
     UnifiedToolResult,
-    Role,
 )
 from ..tools.base import BaseTool
 
@@ -61,7 +56,7 @@ class GeminiAgent(BaseAgent):
         self.client = genai.Client(api_key=api_key)
         self.tool_definitions = self._get_tool_definitions()
 
-    def _get_tool_definitions(self) -> Optional[GeminiTool]:
+    def _get_tool_definitions(self) -> Optional[Tool]:
         """
         Formats tool definitions for the Gemini API.
         Called once during initialization.
@@ -69,22 +64,20 @@ class GeminiAgent(BaseAgent):
         Returns:
             A GeminiTool object containing function declarations.
         """
-        function_declarations: List[FunctionDeclaration] = []
-        for tool in self.tools.values():
-            # Get tool definition as ToolDefinition object
+        functions: List[FunctionDeclaration] = []
+        for name, tool in self.tools.items():
             tool_def = tool.get_definition()
 
-            declaration = FunctionDeclaration(
-                name=tool_def.name,
+            functions.append(FunctionDeclaration(
+                name=name,
                 description=tool_def.description,
-                parameters=tool_def.input_schema or None,
-            )
-            function_declarations.append(declaration)
+                parameters=tool_def.input_schema,
+            ))
 
-        if not function_declarations:
+        if not functions:
             return None # No tools defined
 
-        return GeminiTool(function_declarations=function_declarations)
+        return Tool(function_declarations=functions)
 
     def _get_tool_config(
         self,
@@ -127,39 +120,24 @@ class GeminiAgent(BaseAgent):
     async def _execute_provider_api_call(
         self,
         messages: List[ContentOrDict],
-        tools: Optional[GeminiTool],
+        tools: Optional[Tool],
         tool_config: Optional[ToolConfig]
-    ) -> Tuple[Any, Dict[str, int]]:
+    ) -> Tuple[GenerateContentResponse, Dict[str, int]]:
         """
         Executes the actual API call to Gemini.
         Returns the response object and a dictionary with token usage.
         """
-        # Filter out empty messages which can cause errors
-        api_messages = [msg for msg in messages if msg.get("parts")]
-        if not api_messages:
-             raise ValueError("Cannot call Gemini API with empty messages list.")
-
-        logger.debug(f"Calling Gemini API with {len(api_messages)} messages.")
-
-        # Prepare generation config
-        gen_config = GenerationConfig(
+        generate_content_config = GenerateContentConfig(
+            tools=[tools],
+            tool_config=tool_config,
             temperature=self.config.temperature,
             max_output_tokens=self.config.max_tokens
         )
 
-        # Prepare tool config if tools are present
-        api_tools = [tools] if tools else None
-        
-        generate_content_config = GenerateContentConfig(
-            tools=api_tools,
-            tool_config=tool_config,
-            generation_config=gen_config
-        )
-
         response: GenerateContentResponse = await self.client.aio.models.generate_content(
             model=self.config.model,
-            contents=api_messages,
-            generation_config=generate_content_config,
+            contents=messages,
+            config=generate_content_config,
         )
 
         # Extract token usage
@@ -171,11 +149,11 @@ class GeminiAgent(BaseAgent):
             
         return response, usage_info
 
-    def _verify_tool_included(self, api_tools: Optional[GeminiTool], summary_tool_name: str) -> bool:
+    def _verify_tool_included(self, api_tools: Optional[Tool], summary_tool_name: str) -> bool:
         """
         Verify that the summary tool is included in the Gemini tool definitions.
         """
-        if not api_tools or not isinstance(api_tools, GeminiTool):
+        if not api_tools or not isinstance(api_tools, Tool):
             return False
             
         for decl in api_tools.function_declarations:

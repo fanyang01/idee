@@ -1,22 +1,24 @@
 import logging
 from typing import Dict, Any
 
-from .base import BaseTool, ToolError
+from .base import BaseTool, ToolError, ToolResult
 
 logger = logging.getLogger(__name__)
 
-class RecordConversationSummaryTool(BaseTool):
+_TOOL_DESCRIPTION = """
+Records the provided summary of the conversation so far.
+- This tool should be called only once at the end of an interaction turn to condense the history for future turns, i.e., calling this tool should be your last action in a turn.
+- Provide a detailed but concise summary of our conversation above. Focus on information that would be helpful for continuing the conversation, including what we did, what we're doing, which files we're working on, and what we're going to do next.
+"""
+
+class ConversationSummaryTool(BaseTool):
     """
     A tool used by the LLM agent to provide a summary of the conversation
     at the end of a turn. The agent framework handles the actual storage
     of this summary.
     """
-    name: str = "record_conversation_summary"
-    description: str = (
-        "Records the provided summary of the conversation so far. "
-        "This tool should be called only once at the very end of an interaction turn "
-        "to condense the history for future turns. Provide the concise summary text."
-    )
+    name: str = "save_conversation_summary"
+    description: str = _TOOL_DESCRIPTION.strip()
     input_schema: Dict[str, Any] = {
         "type": "object",
         "properties": {
@@ -44,12 +46,13 @@ class RecordConversationSummaryTool(BaseTool):
         if not summary_text or not isinstance(summary_text, str):
              # This shouldn't happen if the LLM follows the schema, but good to check.
              logger.warning("RecordConversationSummaryTool received invalid or empty summary text.")
+             # Raising ToolError here is appropriate as it's an issue with the input provided to the tool.
              raise ToolError("Summary text must be a non-empty string.")
 
         logger.info(f"Received conversation summary via tool call: {summary_text[:100]}...")
         # The agent's logic will take summary_text from the tool call arguments
         # and update its state / save it to the HistoryDB.
-        # This tool's run method doesn't need to *do* much itself.
-        return {"status": "success", "message": "Summary received and will be recorded."}
+        # No try/except block is needed here as no external calls that might raise ToolError are made.
+        return ToolResult("Summary received and will be recorded.")
 
 

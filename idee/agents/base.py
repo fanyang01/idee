@@ -4,8 +4,8 @@ import asyncio
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, Type, Tuple
 
-from ..tools.base import BaseTool, ToolError
-from ..tools.summary import RecordConversationSummaryTool
+from ..tools.base import BaseTool, ToolError, ToolResult
+from ..tools.summary import ConversationSummaryTool
 from ..agents.types import (
     UnifiedMessage,
     UnifiedToolCall,
@@ -43,10 +43,10 @@ class BaseAgent(ABC):
         self._register_tools(tools)
 
         # Ensure the mandatory summary tool is registered
-        if RecordConversationSummaryTool.name not in self.tools:
-             summary_tool_instance = RecordConversationSummaryTool()
+        if ConversationSummaryTool.name not in self.tools:
+             summary_tool_instance = ConversationSummaryTool()
              self.tools[summary_tool_instance.name] = summary_tool_instance
-             logger.info(f"Mandatory tool '{RecordConversationSummaryTool.name}' registered.")
+             logger.info(f"Mandatory tool '{ConversationSummaryTool.name}' registered.")
 
         # Initialize tool definitions once
         self.tool_definitions = self._get_tool_definitions()
@@ -310,13 +310,15 @@ class BaseAgent(ABC):
             try:
                 # TODO: Add input validation against tool's args_schema if implemented
                 # The tool instance already has its dependencies (like history_db)
-                output = await tool.run(**tool_input)
-                # Ensure output is serializable (e.g., convert complex objects to str)
-                # This might need refinement based on tool outputs.
-                if not isinstance(output, (str, dict, list, int, float, bool, type(None))):
-                     output = str(output)
-
-                logger.info(f"Tool '{tool_name}' (ID: {call_id}) executed successfully.")
+                tool_result = await tool.run(**tool_input)
+                
+                if tool_result.error:
+                    logger.error(f"Tool '{tool_name}' (ID: {call_id}) execution error: {tool_result.error}")
+                    output = tool_result.error
+                    is_error = True
+                else:
+                    output = tool_result.output
+                    logger.info(f"Tool '{tool_name}' (ID: {call_id}) executed successfully.")
 
             except ToolError as e:
                 logger.error(f"Tool '{tool_name}' (ID: {call_id}) execution error: {e}")
@@ -333,12 +335,13 @@ class BaseAgent(ABC):
 
         # Record tool execution in history DB? Maybe optional.
 
+        # Create UnifiedToolResult - if we got a base64_image or system message from a ToolResult,
+        # we might want to include these in the UnifiedToolResult in future iterations
         return UnifiedToolResult(
             call_id=call_id,
             tool_name=tool_name,
             tool_output=output,
             is_error=is_error,
-            # Add latency_ms to UnifiedToolResult if desired
         )
 
     async def _run_agent_loop(
@@ -450,7 +453,7 @@ class BaseAgent(ABC):
             The generated summary string, or an error message.
         """
         logger.info("Initiating end-of-turn conversation summary.")
-        summary_tool_name = RecordConversationSummaryTool.name
+        summary_tool_name = ConversationSummaryTool.name
         summary = f"Error: Could not generate summary." # Default error summary
 
         try:

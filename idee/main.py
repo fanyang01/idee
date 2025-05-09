@@ -114,9 +114,9 @@ async def main():
     agent_type = args.agent or cfg.get("agent_type", "gpt")
 
     # Expand user directory in db_path and mkdir if needed
-    _db_path = Path(db_path).expanduser()
-    if not _db_path.parent.exists():
-        _db_path.parent.mkdir(parents=True, exist_ok=True)
+    expanded_db_path = Path(db_path).expanduser()
+    if not expanded_db_path.parent.exists():
+        expanded_db_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Setup logging
     setup_logging(level=log_level)
@@ -134,7 +134,7 @@ async def main():
         logger.info(f"Initializing {agent_type.capitalize()} agent...")
         agent_instance = AgentClass(
             config=agent_config,
-            history_db_path=db_path,
+            history_db_path=expanded_db_path,
             # tools=[] # Add custom tools here if needed
         )
 

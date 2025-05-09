@@ -27,7 +27,6 @@ from .types import (
     UnifiedToolResult,
     Role,
 )
-from ..tools.summary import RecordConversationSummaryTool
 from ..tools.base import BaseTool
 
 logger = logging.getLogger(__name__)

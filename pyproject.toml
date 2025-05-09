@@ -30,6 +30,7 @@ dependencies = [
     "pyyaml>=6.0",          # For potential config files
     "asyncio",
     "typing_extensions",    # For newer typing features if needed
+    "httpx[socks]"
 ]
 
 [project.urls]

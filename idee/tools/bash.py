@@ -3,7 +3,7 @@ import asyncio
 import shlex
 from typing import Dict, Any, Tuple
 
-from .base import BaseTool, ToolError
+from .base import BaseTool, ToolError, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -80,10 +80,10 @@ class BashTool(BaseTool):
             logger.error(f"Command not found: {command.split()[0]}")
             raise ToolError(f"Command not found: {command.split()[0]}")
         except Exception as e:
-            logger.exception(f"Error executing command '{command}': {e}")
+            logger.exception(f"Failed to execute command '{command}': {e}")
             raise ToolError(f"An unexpected error occurred: {e}")
 
-    async def run(self, command: str) -> Dict[str, Any]:
+    async def run(self, command: str) -> ToolResult:
         """
         Executes the bash command.
 
@@ -91,23 +91,27 @@ class BashTool(BaseTool):
             command: The bash command string.
 
         Returns:
-            A dictionary containing stdout, stderr, and return_code.
+            A ToolResult containing stdout, stderr, and return_code.
         """
         if not command or not isinstance(command, str):
             raise ToolError("Invalid command provided. Command must be a non-empty string.")
 
-        # Basic safety check: prevent execution of extremely dangerous commands directly?
-        # This is tricky. Relying on the LLM's safety features and user oversight is key.
-        # Example (very basic):
-        # if "rm -rf /" in command:
-        #     raise ToolError("Potentially dangerous command detected and blocked.")
-
         stdout, stderr, return_code = await self._run_command(command)
-
-        return {
+        
+        result = {
             "stdout": stdout,
             "stderr": stderr,
             "return_code": return_code,
         }
+        
+        # Include stderr in the error field if the command failed
+        error_message = None
+        if return_code != 0 and stderr:
+            error_message = f"Command failed with return code {return_code}: {stderr}"
+            
+        return ToolResult(
+            output=str(result) if isinstance(result, dict) else result,
+            error=error_message
+        )
 
 

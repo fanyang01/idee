@@ -22,11 +22,13 @@ from openai.types.responses import (
     Response,
     ResponseInputItemParam,
     ResponseOutputItem,
-    ToolChoice,
     ToolChoiceOptions,
     ToolChoiceFunctionParam,
     ToolParam,
     FunctionToolParam,
+)
+from openai.types.responses.response_create_params import (
+    ToolChoice
 )
 
 
