@@ -2,7 +2,7 @@ import logging
 import time
 import asyncio
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional, Type, Tuple
+from typing import List, Dict, Any, Optional, Type, Tuple, Callable
 
 from ..tools.base import BaseTool, ToolError, ToolResult
 from ..tools.summary import ConversationSummaryTool
@@ -20,6 +20,9 @@ from ..tools.history import HistoryTool
 
 logger = logging.getLogger(__name__)
 
+# Define a type for the message observer callback
+MessageObserverCallback = Callable[[UnifiedMessage], None]
+
 class BaseAgent(ABC):
     """
     Abstract base class for LLM agents.
@@ -33,11 +36,13 @@ class BaseAgent(ABC):
         config: AgentConfig,
         tools: Optional[List[Type[BaseTool]]] = None,
         history_db_path: str = None,
+        message_observer: Optional[MessageObserverCallback] = None,
     ):
         self.config = config
         self.state = AgentState()
         self.tools: Dict[str, BaseTool] = {}
         self.history_db = HistoryDB(db_path=history_db_path) # HistoryDB is created here
+        self.message_observer = message_observer
 
         # Instantiate and register tools, injecting dependencies as needed
         self._register_tools(tools)
@@ -386,6 +391,9 @@ class BaseAgent(ABC):
                 logger.exception("Error calling LLM API")
                 error_msg = UnifiedMessage(role="assistant", content=f"Error calling API: {e}")
                 turn_messages.append(error_msg)
+                # Notify observer of error message
+                if self.message_observer:
+                    self.message_observer(error_msg)
                 break
 
             # 2. Parse Response
@@ -395,6 +403,9 @@ class BaseAgent(ABC):
                 logger.error(f"Error parsing LLM response: {parse_error}")
                 error_msg = UnifiedMessage(role="assistant", content=f"Error parsing response: {parse_error}")
                 turn_messages.append(error_msg)
+                # Notify observer of error message
+                if self.message_observer:
+                    self.message_observer(error_msg)
                 break
 
             # 3. Update native messages with assistant response (API-specific implementation)
@@ -409,6 +420,10 @@ class BaseAgent(ABC):
                 token_count=metrics.get("output_tokens")
             )
             turn_messages.append(assistant_message)
+            
+            # Notify observer of assistant message immediately
+            if self.message_observer:
+                self.message_observer(assistant_message)
 
             logger.debug(f"Assistant response: {assistant_text}")
             if tool_calls:
@@ -431,11 +446,19 @@ class BaseAgent(ABC):
                 tool_results=tool_results
             )
             turn_messages.append(tool_result_message)
+            
+            # Notify observer of tool results immediately
+            if self.message_observer:
+                self.message_observer(tool_result_message)
 
         if iteration == max_tool_iterations:
             logger.warning(f"Reached maximum tool execution iterations ({max_tool_iterations}).")
-            warning_msg = UnifiedMessage(role="assistant", content=f"Reached maximum tool iterations ({max_tool_iterations}).")
+            warning_msg = UnifiedMessage(role="user", content=f"Reached maximum tool iterations ({max_tool_iterations}).")
             turn_messages.append(warning_msg)
+            
+            # Notify observer of warning message
+            if self.message_observer:
+                self.message_observer(warning_msg)
             
             # Add warning message to native_messages (API-specific implementation)
             self._append_warning_message(current_native_messages, f"Reached maximum tool iterations ({max_tool_iterations}).")
@@ -501,7 +524,7 @@ class BaseAgent(ABC):
             logger.info(f"Conversation summary generated: {summary[:100]}...")
 
         except Exception as e:
-            logger.exception("Error during conversation summarization")
+            logger.exception("Failed to summarize conversation")
             summary = summary + f" (Exception: {e})"
 
         return summary

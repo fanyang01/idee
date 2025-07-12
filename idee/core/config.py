@@ -12,42 +12,42 @@ DEFAULT_CONFIG = {
     "agent_type": "gpt",
     "db_path": "~/.idee/history.db",
     "log_level": "INFO",
-    "openai": {
-        "model": "gpt-4o", # Default OpenAI model
+    "gpt": {
+        "model": "gpt-4.1",
         "api_key": None,
         "api_base": None,
-        "use_responses_api": False, # Defaulting to False until stable/tested
+        "use_responses_api": False,
         "max_tokens": 4096,
     },
     "gemini": {
-        "model": "gemini-2.0-flash", # Default Gemini model
+        "model": "gemini-2.5-flash",
         "api_key": None,
-        "max_tokens": 4096, # Note: Gemini often uses input/output token limits differently
+        "max_tokens": 4096,
     },
     "claude": {
-        "model": "claude-3-7-sonnet-20250219", # Default Claude model
+        "model": "claude-3-7-sonnet-20250219",
         "api_key": None,
-        "tool_version": "2025-01-24", # Check Anthropic docs for latest recommended version
-        "thinking_budget": 0, # Default disabled
+        "tool_version": "2025-01-24",
+        "thinking_budget": 0,
         "max_tokens": 4096,
     },
     "tui": {
-        "theme": "dark", # Example TUI setting
+        "theme": "dark",
     }
 }
 
-# Environment variable mapping (Optional but can be convenient)
+# Environment variable mapping
 ENV_VAR_MAP = {
     "AGENT_TYPE": "agent_type",
     "DB_PATH": "db_path",
     "LOG_LEVEL": "log_level",
-    "OPENAI_API_KEY": "openai.api_key",
-    "OPENAI_MODEL": "openai.model",
-    "OPENAI_API_BASE": "openai.api_base",
+    "OPENAI_API_KEY": "gpt.api_key",
+    "OPENAI_MODEL": "gpt.model",
+    "OPENAI_API_BASE": "gpt.api_base",
     "GEMINI_API_KEY": "gemini.api_key",
     "GEMINI_MODEL": "gemini.model",
     "ANTHROPIC_API_KEY": "claude.api_key",
-    "CLAUDE_MODEL": "claude.model",
+    "ANTHROPIC_MODEL": "claude.model",
 }
 
 _config: Optional[Dict[str, Any]] = None
@@ -165,20 +165,3 @@ def find_dotenv() -> Optional[str]:
         if dotenv_path.exists():
             return str(dotenv_path)
     return None
-
-# --- Helper functions to get specific config sections ---
-
-def get_agent_config() -> Dict[str, Any]:
-    """Gets the config section for the selected agent type."""
-    cfg = get_config()
-    agent_type = cfg.get("agent_type", "gpt")
-    if agent_type not in ["gpt", "gemini", "claude"]:
-        logger.warning(f"Invalid agent_type '{agent_type}', defaulting to 'gpt'.")
-        agent_type = "gpt"
-    return cfg.get(agent_type, {})
-
-def get_tui_config() -> Dict[str, Any]:
-    """Gets the TUI configuration section."""
-    return get_config().get("tui", {})
-
-

@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import asyncio
 from typing import Any, Dict, Optional, Type
+import json
 
 # Import configuration, logging setup, agents, and TUI
 from .core.config import load_config, get_config
@@ -48,9 +49,11 @@ def parse_arguments() -> argparse.Namespace:
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Set the logging level.",
     )
-    # Add arguments for API keys? Generally prefer env vars or config file.
-    # parser.add_argument("--openai-api-key", type=str, help="OpenAI API Key")
-    # ... other keys
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        help="Path to the log file (default: .idee.log).",
+    )
 
     return parser.parse_args()
 
@@ -63,7 +66,6 @@ def get_agent_class(agent_type: str) -> Type[BaseAgent]:
     elif agent_type == "claude":
         return ClaudeAgent
     else:
-        # Should be caught by argparse choices, but defensive check
         raise ValueError(f"Unknown agent type: {agent_type}")
 
 def create_agent_config(agent_type: str, args: argparse.Namespace, cfg: Dict[str, Any]) -> AgentConfig:
@@ -105,11 +107,11 @@ async def main():
     args = parse_arguments()
 
     # Load configuration from file and environment variables
-    # Pass args.config path if provided
     cfg = load_config(config_path=args.config)
 
     # Determine final configuration values, potentially overridden by args
     log_level = args.log_level or cfg.get("log_level", "INFO")
+    log_file = args.log_file or cfg.get("log_file", ".idee.log")
     db_path = args.db_path or cfg.get("db_path", "~/.idee/history.db")
     agent_type = args.agent or cfg.get("agent_type", "gpt")
 
@@ -119,11 +121,10 @@ async def main():
         expanded_db_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Setup logging
-    setup_logging(level=log_level)
+    setup_logging(level=log_level, log_file=log_file)
     logger.info("Starting Idee...")
-    # logger.debug(f"Arguments: {args}")
-    # logger.debug(f"Effective Config: {json.dumps(cfg, indent=2)}")
-
+    logger.debug(f"Arguments: {args}")
+    logger.debug(f"Effective Config: {json.dumps(cfg, indent=2)}")
 
     try:
         # Get agent class and create specific config
@@ -156,7 +157,7 @@ async def main():
         print(f"An unexpected error occurred: {e}", file=sys.stderr)
         sys.exit(1)
     finally:
-        logger.info("Codemate finished.")
+        logger.info("Idee finished.")
 
 
 def run():
@@ -164,7 +165,7 @@ def run():
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Codemate interrupted by user.")
+        logger.info("Idee interrupted by user.")
         print("\nExiting...")
     except Exception as e:
         # Catch errors during asyncio.run itself if any

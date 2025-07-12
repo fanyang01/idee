@@ -8,12 +8,13 @@ LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # --- Setup ---
-def setup_logging(level: str = LOG_LEVEL) -> None:
+def setup_logging(level: str = LOG_LEVEL, log_file: str = ".idee.log") -> None:
     """
     Configures the root logger for the application.
 
     Args:
         level: The minimum logging level to output.
+        log_file: Path to the log file (default: .idee.log).
     """
     log_level_enum = getattr(logging, level.upper(), logging.INFO)
 
@@ -31,10 +32,10 @@ def setup_logging(level: str = LOG_LEVEL) -> None:
         root_logger.setLevel(log_level_enum)
         root_logger.addHandler(rich_handler)
 
-        # Optionally, add a file handler
-        # file_handler = logging.FileHandler("codemate.log")
-        # file_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT))
-        # root_logger.addHandler(file_handler)
+        # Add a file handler for logging to .idee.log
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT))
+        root_logger.addHandler(file_handler)
 
         logging.getLogger("httpx").setLevel(logging.WARNING) # Quiet down noisy libraries
         logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -42,19 +43,8 @@ def setup_logging(level: str = LOG_LEVEL) -> None:
         logging.getLogger("google").setLevel(logging.WARNING)
         logging.getLogger("anthropic").setLevel(logging.WARNING)
 
-        logging.info(f"Logging configured with level {level.upper()}")
+        logging.info(f"Logging configured with level {level.upper()}, output to console and {log_file}")
     else:
         # If already configured, just ensure the level is set
         root_logger.setLevel(log_level_enum)
         logging.debug("Logger already configured. Setting level.")
-
-# Call setup_logging() when this module is imported?
-# Generally better to call it explicitly from the main entry point.
-# setup_logging()
-
-# Example usage (in other modules):
-# import logging
-# logger = logging.getLogger(__name__)
-# logger.info("This is an info message.")
-# logger.debug("This is a debug message.")
-

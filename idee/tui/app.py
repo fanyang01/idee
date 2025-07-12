@@ -31,6 +31,16 @@ SYSTEM_STYLE = Style(color="grey70", italic=True) # For status messages
 class ConversationLog(RichLog):
     """Custom Log widget to display conversation messages."""
 
+    def clear_last_line(self) -> None:
+        """Removes the last line from the log, useful for replacing temporary messages."""
+        if not self._lines:
+            return
+        
+        # Remove the last line
+        self._lines.pop()
+        # Update the widget
+        self.refresh()
+        
     def add_message(self, message: UnifiedMessage):
         """Formats and adds a UnifiedMessage to the log."""
         if message.role == "user":
@@ -115,7 +125,54 @@ class MainApp(App[None]):
 
     def __init__(self, agent_instance: BaseAgent, *args, **kwargs):
         self.agent = agent_instance
+        self.agent.message_observer = self.handle_message
         super().__init__(*args, **kwargs)
+        
+    def handle_message(self, message: UnifiedMessage) -> None:
+        """Callback function to handle new messages from the agent."""
+        # Check if we're in the same thread as the app
+        import threading
+        current_thread = threading.current_thread()
+        app_thread = self._thread_id if hasattr(self, "_thread_id") else None
+        
+        if current_thread.ident == app_thread:
+            # If we're in the app's thread, directly update the UI
+            self.add_message_to_log(message)
+        else:
+            # If we're in a different thread, use call_from_thread
+            try:
+                self.call_from_thread(self.add_message_to_log, message)
+            except RuntimeError as e:
+                # In case we still get an error, log it
+                logger.warning(f"RuntimeError in call_from_thread: {e}")
+                # Try using async scheduling instead
+                asyncio.run_coroutine_threadsafe(self._async_add_message(message), self.run_worker.app_loop)
+    
+    async def _async_add_message(self, message: UnifiedMessage) -> None:
+        """Async helper to add message from another thread."""
+        self.add_message_to_log(message)
+
+    def add_message_to_log(self, message: UnifiedMessage) -> None:
+        """Adds a message to the conversation log."""
+        log = self.query_one(ConversationLog)
+        # Remove the "Thinking..." message when we get a new message
+        if message.role == "assistant" and message.content:
+            # Check if the last message was the "Thinking..." system message
+            if hasattr(log, "_last_message") and log._last_message == "thinking":
+                # If we were showing "Thinking...", we can replace it
+                log.clear_last_line()
+            
+        # Add the message to the log
+        log.add_message(message)
+        
+        # Track the last message type for potential removal
+        if message.role == "system" and message.content == "Thinking...":
+            log._last_message = "thinking"
+        else:
+            log._last_message = message.role
+            
+        # Scroll to the bottom to show latest messages
+        log.scroll_end(animate=False)
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -126,6 +183,10 @@ class MainApp(App[None]):
 
     def on_mount(self) -> None:
         """Called when the app is mounted."""
+        # Store the app's thread ID
+        import threading
+        self._thread_id = threading.current_thread().ident
+        
         self.query_one("#user-input", Input).focus()
         log = self.query_one(ConversationLog)
         log.add_message(UnifiedMessage(role="system", content=f"Welcome to Idee! Using {self.agent.config.model}. Type your request and press Enter."))
@@ -145,28 +206,19 @@ class MainApp(App[None]):
         input_widget.clear()
         log.add_message(UnifiedMessage(role="user", content=user_input))
 
-        # Set processing state and show thinking message
+        # Set processing state and show Thinking message
         self.is_processing = True
         log.add_message(UnifiedMessage(role="system", content="Thinking..."))
         input_widget.disabled = True # Disable input while processing
 
         try:
-            # Run agent processing in background task
-            turn_messages = await self.agent.start_turn(user_input)
-
-            # Remove the "Thinking..." message (find and remove last system message?)
-            # This is tricky with Log widget, maybe just add results after.
-
-            # Display results from the turn
-            for msg in turn_messages:
-                 # Skip the initial user message as we already displayed it
-                 if msg.role != "user":
-                     log.add_message(msg)
+            # Run the agent loop - messages will be displayed via the observer callback
+            await self.agent.start_turn(user_input)
+            # No need to display messages here, they're displayed in real-time by the observer
 
         except Exception as e:
-            logger.exception("Error during agent turn processing in TUI")
-            log.add_message(UnifiedMessage(role="system", content=f"Error: {e}", timestamp=time.time())) # Use system role for errors
-            # Add error style later if needed
+            logger.exception("Error during agent loop.")
+            log.add_message(UnifiedMessage(role="system", content=f"Error: {e}", timestamp=time.time()))
 
         finally:
             # Reset processing state

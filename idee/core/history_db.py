@@ -68,6 +68,16 @@ class HistoryDB:
             return
 
         try:
+            # First check if any messages from this turn already exist
+            existing = self.conn.execute(
+                "SELECT COUNT(*) FROM conversation_history WHERE session_id = ? AND turn_id = ?",
+                (session_id, turn_id)
+            ).fetchone()[0]
+            
+            if existing > 0:
+                logger.warning(f"Messages for turn {turn_id} already exist in DB. Skipping insertion.")
+                return
+                
             records = []
             for i, msg in enumerate(messages):
                 # Serialize tool calls/results to JSON strings
@@ -109,12 +119,25 @@ class HistoryDB:
             logger.error("Database connection is not available. Cannot add summary.")
             return
         try:
-            self.conn.execute(
-                "INSERT INTO conversation_summaries (turn_id, session_id, summary) VALUES (?, ?, ?)",
-                (turn_id, session_id, summary)
-            )
+            # Check if a summary for this turn already exists
+            existing = self.conn.execute(
+                "SELECT COUNT(*) FROM conversation_summaries WHERE session_id = ? AND turn_id = ?",
+                (session_id, turn_id)
+            ).fetchone()[0]
+            
+            if existing > 0:
+                logger.warning(f"Summary for turn {turn_id} already exists in DB. Updating instead of inserting.")
+                self.conn.execute(
+                    "UPDATE conversation_summaries SET summary = ?, timestamp = CURRENT_TIMESTAMP WHERE session_id = ? AND turn_id = ?",
+                    (summary, session_id, turn_id)
+                )
+            else:
+                self.conn.execute(
+                    "INSERT INTO conversation_summaries (turn_id, session_id, summary) VALUES (?, ?, ?)",
+                    (turn_id, session_id, summary)
+                )
             self.conn.commit()
-            logger.debug(f"Added summary for turn {turn_id} to history DB.")
+            logger.debug(f"Added/updated summary for turn {turn_id} to history DB.")
         except Exception as e:
             logger.exception(f"Failed to add summary for turn {turn_id}: {e}")
             self.conn.rollback()

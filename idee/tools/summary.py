@@ -53,6 +53,6 @@ class ConversationSummaryTool(BaseTool):
         # The agent's logic will take summary_text from the tool call arguments
         # and update its state / save it to the HistoryDB.
         # No try/except block is needed here as no external calls that might raise ToolError are made.
-        return ToolResult("Summary received and will be recorded.")
+        return ToolResult(output="Summary received and will be recorded.")
 
 
