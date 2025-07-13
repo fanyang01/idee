@@ -16,6 +16,11 @@ from anthropic.types import (
     ToolResultBlockParam, # Type hint for formatting tool results
     Message, # Type hint for the response object
 )
+from anthropic.types.beta import (
+    BetaToolUnionParam,
+    BetaMessageParam,
+    BetaMessage,
+)
 
 from .base import BaseAgent
 from .templates import format_conversation_summary
@@ -65,22 +70,52 @@ class ClaudeAgent(BaseAgent):
         # Define system prompt (can be customized)
         self.system_prompt = "You are Codemate, an AI coding assistant. Use the available tools to help the user with their requests. Think step-by-step if needed. When summarizing, be concise and capture the key outcomes and remaining tasks."
 
+        # Configure vendor-specific tool behaviors
+        self._configure_vendor_tools()
+        
         # Precompute tool definitions
         self.tool_definitions = self._get_tool_definitions()
+        self.has_vendor_tools = any(tool.has_vendor_spec("anthropic", self.config.model) for tool in self.tools.values())
+        
+        # Determine which beta flags are needed based on vendor specs
+        self.beta_flags = self._get_beta_flags()
+        
+        if self.has_vendor_tools:
+            logger.info(f"Using beta API with vendor tools (flags: {self.beta_flags})")
+        else:
+            logger.info(f"Using standard API")
 
-    def _get_tool_definitions(self) -> List[ToolUnionParam]:
+    def _configure_vendor_tools(self):
+        """Configure vendor-specific tool behaviors."""
+        for tool in self.tools.values():
+            # Enable persistent session for BashTool when using vendor specs
+            if tool.name == "bash" and tool.has_vendor_spec("anthropic", self.config.model):
+                if hasattr(tool, 'enable_persistent_session'):
+                    tool.enable_persistent_session()
+                    logger.debug("Enabled persistent session for bash tool")
+
+    def _get_tool_definitions(self) -> List[Union[ToolUnionParam, BetaToolUnionParam]]:
         """
         Formats tool definitions for the Anthropic API.
+        Uses vendor-specific format when available, otherwise uses regular format.
         Called once during initialization.
 
         Returns:
             List of tool definitions formatted for the Anthropic API.
         """
-        formatted_tools: List[ToolUnionParam] = []
+        formatted_tools: List[Union[ToolUnionParam, BetaToolUnionParam]] = []
+        
         for tool in self.tools.values():
+            # Check if this tool has Anthropic vendor specification for this model
+            if tool.has_vendor_spec("anthropic", self.config.model):
+                vendor_spec = tool.get_vendor_spec("anthropic", self.config.model)
+                if vendor_spec:
+                    formatted_tools.append(vendor_spec)
+                    logger.debug(f"Added vendor tool: {tool.name} (spec: {vendor_spec})")
+                    continue
+            
+            # Regular tool handling
             tool_def = tool.get_definition()
-
-            # Anthropic's format
             formatted_tools.append(ToolParam(
                 name=tool_def.name,
                 description=tool_def.description,
@@ -88,6 +123,32 @@ class ClaudeAgent(BaseAgent):
             ))
 
         return formatted_tools
+
+    def _get_beta_flags(self) -> List[str]:
+        """Determine which beta flags are needed based on vendor tool specs."""
+        beta_flags = set()
+        
+        for tool in self.tools.values():
+            if tool.has_vendor_spec("anthropic", self.config.model):
+                vendor_spec = tool.get_vendor_spec("anthropic", self.config.model)
+                if vendor_spec and "type" in vendor_spec:
+                    spec_type = vendor_spec["type"]
+                    
+                    # Map spec types to beta flags
+                    if spec_type == "text_editor_20250429":
+                        beta_flags.add("str-replace-based-edit-tool")
+                    elif spec_type == "text_editor_20250124":
+                        beta_flags.add("text-editor-20250124")
+                    elif spec_type == "text_editor_20241022":
+                        beta_flags.add("text-editor-20241022")
+                    elif spec_type == "computer_20241022":
+                        beta_flags.add("computer-use-2024-10-22")
+                    elif spec_type == "computer_20250124":
+                        beta_flags.add("computer-use-2025-01-24")
+                    elif spec_type == "bash_20250124":
+                        beta_flags.add("bash-tool-2025-01-24")
+                        
+        return list(beta_flags)
 
     def _get_tool_config(
         self,
@@ -125,43 +186,63 @@ class ClaudeAgent(BaseAgent):
         Executes the actual API call to Anthropic.
         Returns the response object and a dictionary with token usage.
         """
-        api_messages = cast(List[MessageParam], messages)
-        api_tools = cast(List[ToolParam], tools)
-
         # Prepare optional 'thinking' parameter for models like Claude 3.7 Sonnet
         thinking_param = None
         if self.config.thinking_budget and self.config.thinking_budget > 0:
              thinking_param = {"type": "enabled", "budget_tokens": self.config.thinking_budget}
              logger.debug(f"Enabling Claude 'thinking' with budget: {self.config.thinking_budget}")
 
-        logger.debug(f"Calling Anthropic API with {len(api_messages)} messages.")
+        logger.debug(f"Calling Anthropic API with {len(messages)} messages.")
 
-        # Use the tool_choice parameter if provided
-        kwargs = {
-            "model": self.config.model,
-            "system": self.system_prompt, # System prompt passed separately
-            "messages": api_messages,
-            "tools": api_tools,
-            "max_tokens": self.config.max_tokens,
-            "temperature": self.config.temperature,
-        }
-        
-        # Add tool_choice if specified
-        if tool_choice:
-            kwargs["tool_choice"] = tool_choice
+        # Decide whether to use beta API based on vendor tools
+        if self.has_vendor_tools:
+            # Use beta API for vendor tools
+            beta_messages = cast(List[BetaMessageParam], messages)
+
+            kwargs = {
+                "model": self.config.model,
+                "system": [self.system_prompt],
+                "messages": beta_messages,
+                "tools": self.tool_definitions,
+                "max_tokens": self.config.max_tokens,
+                "betas": self.beta_flags,
+            }
             
-        # Add thinking parameter if enabled
-        if thinking_param:
-            kwargs["thinking"] = thinking_param
+            if tool_choice:
+                kwargs["tool_choice"] = tool_choice
+                
+            if thinking_param:
+                kwargs["extra_body"] = {"thinking": thinking_param}
 
-        response: Message = await self.client.messages.create(**kwargs)
+            logger.debug("Using beta API for vendor tools")
+            response: BetaMessage = await self.client.beta.messages.create(**kwargs)
+        else:
+            # Use regular API
+            api_messages = cast(List[MessageParam], messages)
+            api_tools = cast(List[ToolParam], tools)
+
+            kwargs = {
+                "model": self.config.model,
+                "system": self.system_prompt,
+                "messages": api_messages,
+                "tools": api_tools,
+                "max_tokens": self.config.max_tokens,
+                "temperature": self.config.temperature,
+            }
+            
+            if tool_choice:
+                kwargs["tool_choice"] = tool_choice
+                
+            if thinking_param:
+                kwargs["thinking"] = thinking_param
+
+            response: Message = await self.client.messages.create(**kwargs)
 
         # Extract token usage
         usage_info = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         if response.usage:
             usage_info["input_tokens"] = response.usage.input_tokens
             usage_info["output_tokens"] = response.usage.output_tokens
-            # Claude provides input/output, total can be derived
             usage_info["total_tokens"] = response.usage.input_tokens + response.usage.output_tokens
             
         return response, usage_info
@@ -177,7 +258,7 @@ class ClaudeAgent(BaseAgent):
 
     def _parse_api_response(
         self,
-        response: Message # Anthropic Message object
+        response: Union[Message, BetaMessage] # Anthropic Message object
     ) -> Tuple[Optional[str], Optional[List[UnifiedToolCall]], Optional[str]]:
         """
         Parses the Anthropic API response (Message object).

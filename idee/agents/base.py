@@ -15,8 +15,9 @@ from ..agents.types import (
 )
 from ..core.history_db import HistoryDB
 from ..tools.bash import BashTool
-from ..tools.editor import TextEditorTool
+from ..tools.editor import StrReplaceEditorTool
 from ..tools.history import HistoryTool
+from ..tools.computer import ComputerTool
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ class BaseAgent(ABC):
     def _register_tools(self, custom_tools: Optional[List[Type[BaseTool]]]) -> None:
         """Instantiates and registers default and custom tools."""
         # Define default tool classes
-        default_tool_classes = [BashTool, TextEditorTool, HistoryTool]
+        default_tool_classes = [BashTool, StrReplaceEditorTool, HistoryTool, ComputerTool]
 
         # Combine default and custom tools, ensuring no duplicates
         all_tool_classes = {tool_cls.name: tool_cls for tool_cls in default_tool_classes}

@@ -12,6 +12,19 @@ logger = logging.getLogger(__name__)
 # Define a maximum runtime for commands to prevent hangs
 COMMAND_TIMEOUT_SECONDS = 60.0
 
+# Output truncation settings
+TRUNCATED_MESSAGE: str = "<response clipped><NOTE>To save on context only part of this file has been shown to you. You should retry this tool after you have searched inside the file with `grep -n` in order to find the line numbers of what you are looking for.</NOTE>"
+MAX_RESPONSE_LEN: int = 16000
+
+
+def maybe_truncate(content: str, truncate_after: int | None = MAX_RESPONSE_LEN) -> str:
+    """Truncate content and append a notice if content exceeds the specified length."""
+    return (
+        content
+        if not truncate_after or len(content) <= truncate_after
+        else content[:truncate_after] + TRUNCATED_MESSAGE
+    )
+
 @dataclass
 class ToolDefinition:
     """Structured representation of a tool's definition."""
@@ -86,6 +99,11 @@ class BaseTool(ABC):
         "required": [],
     }
     strict: bool = False
+    
+    # Vendor-specific tool specifications
+    # Key: vendor name (e.g., "anthropic", "openai", "google")
+    # Value: either a single spec dict, or a dict mapping model patterns to specs
+    vendor_specs: Optional[Dict[str, Union[Dict[str, Any], Dict[str, Dict[str, Any]]]]] = None
 
     @abstractmethod
     async def run(self, **kwargs: Any) -> ToolResult:
@@ -140,6 +158,73 @@ class BaseTool(ABC):
         Extract JSON Schema from a Pydantic model.
         """        
         return model_class.model_json_schema()
+
+    def has_vendor_spec(self, vendor: str, model: Optional[str] = None) -> bool:
+        """Check if this tool has a vendor-specific specification."""
+        return self.get_vendor_spec(vendor, model) is not None
+    
+    def get_vendor_spec(self, vendor: str, model: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """
+        Get the vendor-specific specification for this tool.
+        
+        Args:
+            vendor: The vendor name (e.g., "anthropic")
+            model: The model name (e.g., "claude-3-5-sonnet-20241022")
+            
+        Returns:
+            The vendor specification dict, or None if not found
+        """
+        if self.vendor_specs is None or vendor not in self.vendor_specs:
+            return None
+            
+        vendor_config = self.vendor_specs[vendor]
+        
+        # If it's a simple dict with "type" key, it's a single spec
+        if "type" in vendor_config:
+            return vendor_config
+            
+        # Otherwise, it's a model-specific mapping
+        if model is None:
+            # Return the first available spec if no model specified
+            for spec in vendor_config.values():
+                if isinstance(spec, dict) and "type" in spec:
+                    return spec
+            return None
+            
+        # Find the best matching spec for the model
+        return self._find_best_model_spec(vendor_config, model)
+    
+    def _find_best_model_spec(self, model_specs: Dict[str, Dict[str, Any]], model: str) -> Optional[Dict[str, Any]]:
+        """Find the best matching spec for a given model."""
+        model_lower = model.lower()
+        
+        # Try exact match first
+        if model in model_specs:
+            return model_specs[model]
+            
+        # Try case-insensitive match
+        for pattern, spec in model_specs.items():
+            if pattern.lower() == model_lower:
+                return spec
+                
+        # Try specific pattern matching first (most specific to least specific)
+        # Sort patterns by specificity (longer patterns first)
+        sorted_patterns = sorted(model_specs.items(), key=lambda x: (-len(x[0]), x[0]))
+        
+        for pattern, spec in sorted_patterns:
+            if self._model_matches_pattern(model_lower, pattern.lower()):
+                return spec
+                
+        return None
+    
+    def _model_matches_pattern(self, model: str, pattern: str) -> bool:
+        """Check if a model matches a pattern using simple wildcard matching."""
+        if "*" in pattern:
+            import fnmatch
+            return fnmatch.fnmatch(model, pattern)
+        
+        # Exact pattern match
+        return pattern == model
 
     def get_definition(self) -> ToolDefinition:
         """

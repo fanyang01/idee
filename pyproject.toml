@@ -30,7 +30,10 @@ dependencies = [
     "pyyaml>=6.0",          # For potential config files
     "asyncio",
     "typing_extensions",    # For newer typing features if needed
-    "httpx[socks]"
+    "httpx[socks]",
+    "pyautogui>=0.9.54",   # For cross-platform computer automation
+    "pillow>=8.0.0",       # Required by PyAutoGUI for screenshots
+    "pyscreeze>=0.1.28"    # Required by PyAutoGUI for screenshot functionality
 ]
 
 [project.urls]
