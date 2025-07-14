@@ -1,8 +1,11 @@
 import asyncio
+import base64
 import logging
 import os
 import json
+import tempfile
 import time
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Union, cast
 
 # Import Anthropic library
@@ -32,7 +35,8 @@ from .types import (
     UnifiedToolResult,
     Role,
 )
-from ..tools.base import BaseTool
+from ..tools.base import BaseTool, ToolResult, TextBlock, FileBlock, ImageBlock, AudioBlock, VideoBlock, DocumentBlock
+from ..tools.media_utils import detect_media_type, read_file_as_base64
 
 logger = logging.getLogger(__name__)
 
@@ -305,29 +309,45 @@ class ClaudeAgent(BaseAgent):
             logger.exception(f"Error parsing Anthropic response: {e}")
             return None, None, f"Error parsing response: {e}"
 
-    def _format_tool_results(
+    async def _format_tool_results(
         self,
         tool_results: List[UnifiedToolResult]
     ) -> List[ToolResultBlockParam]:
         """
         Formats tool execution results into the Anthropic ToolResultBlockParam format.
+        Claude supports multimodal content natively in tool results.
         """
         blocks: List[ToolResultBlockParam] = []
         for result in tool_results:
             try:
-                output_content: Union[str, Dict[str, Any]]
-                if result.is_error:
-                     output_content = {"error": str(result.tool_output)}
-                elif isinstance(result.tool_output, (dict, list, str, int, float, bool, type(None))):
-                     output_content = result.tool_output
+                # Handle multimodal content with Claude's native support
+                if result.has_multimodal_content():
+                    # Convert to Claude's native multimodal format
+                    processed_content = await self._process_multimodal_blocks(result.tool_output)
+                    
+                    result_block: ToolResultBlockParam = {
+                        "type": "tool_result",
+                        "tool_use_id": result.call_id,
+                        "content": processed_content,
+                    }
                 else:
-                     output_content = str(result.tool_output)
+                    # For simple tool output
+                    output_content: Union[str, Dict[str, Any]]
+                    if result.is_error:
+                         output_content = {"error": str(result.tool_output)}
+                    elif isinstance(result.tool_output, ToolResult):
+                         output_content = result.tool_output.get_text_content()
+                    elif isinstance(result.tool_output, dict):
+                         output_content = result.tool_output
+                    else:
+                         output_content = str(result.tool_output)
 
-                result_block: ToolResultBlockParam = {
-                    "type": "tool_result",
-                    "tool_use_id": result.call_id,
-                    "content": output_content,
-                }
+                    result_block: ToolResultBlockParam = {
+                        "type": "tool_result",
+                        "tool_use_id": result.call_id,
+                        "content": output_content,
+                    }
+                
                 blocks.append(result_block)
                 logger.debug(f"Formatted tool result for {result.tool_name} (ID: {result.call_id}) for Anthropic.")
 
@@ -341,6 +361,115 @@ class ClaudeAgent(BaseAgent):
                  })
 
         return blocks
+
+    async def _process_multimodal_blocks(self, tool_output: ToolResult) -> List[Dict[str, Any]]:
+        """Convert tool output to Claude API format."""
+        result = []
+        for block in tool_output.content:
+            if isinstance(block, TextBlock):
+                result.append({"type": "text", "text": block.text})
+            elif isinstance(block, FileBlock):
+                # Process FileBlock directly - try upload first, then fallback to base64
+                processed_block = await self._process_file_block(block)
+                result.append(processed_block)
+            elif isinstance(block, (ImageBlock, AudioBlock, VideoBlock, DocumentBlock)):
+                # Claude supports different media types with the same structure
+                block_type_map = {
+                    ImageBlock: "image",
+                    AudioBlock: "audio", 
+                    VideoBlock: "video",
+                    DocumentBlock: "document"
+                }
+                
+                # Use existing source format (base64 or file_path)
+                result.append({
+                    "type": block_type_map[type(block)],
+                    "source": block.source
+                })
+        return result
+    
+    async def _process_file_block(self, file_block: FileBlock) -> Dict[str, Any]:
+        """Process a FileBlock for Claude by uploading to Files API or converting to base64."""
+        
+        # Determine media type if not provided
+        media_type = file_block.media_type
+        if not media_type and file_block.file_path:
+            media_type = detect_media_type(file_block.file_path)
+        
+        # Try to upload for documents
+        if self._should_upload_file(file_block, media_type):
+            file_id = await self._upload_file(file_block)
+            if file_id:
+                return {
+                    "type": "document",
+                    "source": {
+                        "type": "file",
+                        "file_id": file_id
+                    }
+                }
+        
+        # Fallback to base64 for images/other media
+        data = file_block.get_base64_data()
+        
+        # Use appropriate format based on media type
+        if media_type and media_type.startswith("image/"):
+            return {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": data
+                }
+            }
+        else:
+            # For other types, use text representation
+            return {
+                "type": "text",
+                "text": f"[File: {file_block.filename or 'unnamed'} ({media_type or 'unknown type'})]"
+            }
+
+    async def _upload_file(self, file_block: FileBlock) -> Optional[str]:
+        """Upload a file to Claude Files API and return file ID."""
+        if not hasattr(self, 'client') or not self.client:
+            logger.warning("Claude client not available for file upload")
+            return None
+            
+        try:
+            # Prepare file for upload - API supports multiple input types
+            if file_block.file_path:
+                # Use existing file path directly
+                file_input = Path(file_block.file_path)
+            else:
+                # Use bytes content with optional filename and media type
+                filename = file_block.filename or "file"
+                content = file_block.get_bytes_content()
+                if file_block.media_type:
+                    file_input = (filename, content, file_block.media_type)
+                else:
+                    file_input = (filename, content)
+                
+            response = await self.client.beta.files.upload(file=file_input)
+            return response.id
+    
+        except Exception as e:
+            logger.error(f"Claude file upload failed: {e}")
+            return None
+
+    def _should_upload_file(self, file_block: FileBlock, media_type: str) -> bool:
+        """Determine if a file should be uploaded vs embedded for Claude."""
+        # Claude's Files API is best for documents and PDFs
+        if media_type and media_type.startswith(("application/", "text/")):
+            return True
+        
+        # Upload large files regardless of type
+        if file_block.file_path:
+            size = Path(file_block.file_path).stat().st_size
+            if size > 1024 * 1024:  # > 1MB
+                return True
+        elif file_block.content and len(file_block.content) > 1024 * 1024:
+            return True
+            
+        return False
 
     def _append_assistant_message(
         self, 
@@ -361,7 +490,7 @@ class ClaudeAgent(BaseAgent):
         current_native_messages.append(assistant_api_message)
         logger.debug("Appended assistant response message to native messages.")
         
-    def _append_tool_results(
+    async def _append_tool_results(
         self,
         current_native_messages: List[Dict[str, Any]],
         tool_results: List[UnifiedToolResult]
@@ -373,7 +502,7 @@ class ClaudeAgent(BaseAgent):
             current_native_messages: The list of native format messages to append to
             tool_results: The unified tool results to format and append
         """
-        native_tool_result_blocks = self._format_tool_results(tool_results)
+        native_tool_result_blocks = await self._format_tool_results(tool_results)
         
         if native_tool_result_blocks:
             tool_results_message: MessageParam = {

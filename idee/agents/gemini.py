@@ -1,8 +1,11 @@
 import asyncio
+import base64
 import logging
 import os
 import json
+import tempfile
 import time
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
 from google import genai
@@ -18,6 +21,7 @@ from google.genai.types import (
     FunctionCall,
     FunctionResponse,
     ToolConfig,
+    File,
     FunctionCallingConfig,
     GenerateContentConfig,
     GenerateContentResponse,
@@ -30,7 +34,9 @@ from .types import (
     UnifiedToolCall,
     UnifiedToolResult,
 )
-from ..tools.base import BaseTool
+from ..tools.base import BaseTool, ToolResult, TextBlock, FileBlock, ContentBlock, ImageBlock, AudioBlock, VideoBlock, DocumentBlock
+from ..tools.media_utils import detect_media_type, read_file_as_base64
+import io
 
 logger = logging.getLogger(__name__)
 
@@ -217,24 +223,39 @@ class GeminiAgent(BaseAgent):
             return None, None, f"Error parsing response: {e}"
 
 
-    def _format_tool_results(
+    async def _format_tool_results(
         self,
         tool_results: List[UnifiedToolResult]
-    ) -> List[Part]:
+    ) -> tuple[List[Part], List[Dict[str, Any]]]:
         """
         Formats tool execution results into Gemini Part format containing FunctionResponse.
         These parts will be added to the *next* 'user' message sent to the API.
+        
+        Returns tuple of (function_response_parts, follow_up_content)
         """
         parts: List[Part] = []
+        follow_up_content = []
+        
         for result in tool_results:
             try:
                 response_content: Dict[str, Any]
-                if result.is_error:
-                     response_content = {"error": str(result.tool_output)}
-                elif isinstance(result.tool_output, (dict, list, str, int, float, bool, type(None))):
-                     response_content = {"result": result.tool_output}
+                
+                # Handle multimodal content by converting to text with placeholders
+                if result.has_multimodal_content():
+                    content_text, follow_up_data = result.to_simple_format_with_placeholders()
+                    response_content = {"result": content_text}
+                    if follow_up_data:
+                        follow_up_content.append(follow_up_data)
                 else:
-                     response_content = {"result": str(result.tool_output)}
+                    # Legacy handling for simple tool output
+                    if result.is_error:
+                         response_content = {"error": str(result.tool_output)}
+                    elif isinstance(result.tool_output, ToolResult):
+                         response_content = {"result": result.tool_output.get_text_content()}
+                    elif isinstance(result.tool_output, (dict, list, str, int, float, bool, type(None))):
+                         response_content = {"result": result.tool_output}
+                    else:
+                         response_content = {"result": str(result.tool_output)}
 
                 tool_name = result.tool_name
 
@@ -247,7 +268,7 @@ class GeminiAgent(BaseAgent):
             except Exception as e:
                  logger.exception(f"Error formatting tool result {result.tool_name} for Gemini: {e}")
 
-        return parts
+        return parts, follow_up_content
 
     def _append_assistant_message(
         self, 
@@ -266,7 +287,7 @@ class GeminiAgent(BaseAgent):
         else:
             logger.warning("Could not extract assistant message in native format to append (no candidates).")
         
-    def _append_tool_results(
+    async def _append_tool_results(
         self,
         current_native_messages: List[ContentOrDict],
         tool_results: List[UnifiedToolResult]
@@ -278,11 +299,92 @@ class GeminiAgent(BaseAgent):
             current_native_messages: The list of native format messages to append to
             tool_results: The unified tool results to format and append
         """
-        native_tool_result_parts = self._format_tool_results(tool_results)
+        native_tool_result_parts, follow_up_content = await self._format_tool_results(tool_results)
         if native_tool_result_parts:
             current_native_messages.append(UserContent(native_tool_result_parts))
             logger.debug("Appended tool results (FunctionResponse parts) as 'user' role to native messages.")
         
+        # Add follow-up media messages for multimodal content
+        if follow_up_content:
+            await self._append_follow_up_content(current_native_messages, follow_up_content)
+
+    async def _append_follow_up_content(
+        self,
+        current_native_messages: List[ContentOrDict],
+        follow_up_content: List[Dict[str, Any]]
+    ) -> None:
+        """
+        Append a single follow-up user message containing all multimedia content.
+        Uses overall placeholder approach for better content organization.
+        """
+        if not follow_up_content:
+            return
+            
+        # Build a single message containing all tool outputs
+        all_parts = []
+        for content_data in follow_up_content:
+            tool_name = content_data["tool_name"]
+            placeholder_id = content_data["id"]
+            full_content = content_data["full_content"]
+            
+            # Add the ToolOutput wrapper and content
+            all_parts.append(Part.from_text(f'<ToolOutput name="{tool_name}" id="{placeholder_id}">'))
+            all_parts.extend(await self._process_content_blocks(full_content))
+            all_parts.append(Part.from_text('</ToolOutput>'))
+        
+        # Add the single message with all content
+        current_native_messages.append(UserContent(all_parts))
+        logger.debug(f"Appended single follow-up message containing {len(follow_up_content)} tool outputs.")
+
+    async def _process_content_blocks(self, content_blocks: List[ContentBlock]) -> List[Part]:
+        """Process content blocks for Gemini Parts format."""
+        
+        parts = []
+        for block in content_blocks:
+            if isinstance(block, TextBlock):
+                parts.append(Part.from_text(block.text))
+            elif isinstance(block, FileBlock):
+                # Try to upload file and use as Part directly
+                uploaded_file = await self._upload_file(block)
+                if uploaded_file:
+                    # Use the uploaded File directly as a Part (types.File is a PartUnion)
+                    parts.append(uploaded_file)
+                else:
+                    # Fallback to inline media for small files
+                    if block.media_type and block.media_type.startswith(("image/", "audio/", "video/", "application/pdf")):
+                        try:
+                            parts.append(Part.from_bytes(
+                                data=block.get_bytes_content(),
+                                mime_type=block.media_type
+                            ))
+                        except Exception as e:
+                            raise ValueError(f"Failed to process file '{block.filename or 'unnamed'}': {e}")
+                    else:
+                        raise ValueError(f"Unsupported file type for '{block.filename or 'unnamed'}': {block.media_type}")
+            elif isinstance(block, (ImageBlock, AudioBlock, VideoBlock, DocumentBlock)) and block.source.get("type") == "base64":
+                parts.append(Part.from_bytes(
+                    data=base64.b64decode(block.source["data"]),
+                    mime_type=block.source.get("media_type")
+                ))
+            else:
+                raise ValueError(f"Unsupported {block.type} source type: {block.source.get('type', 'unknown')}")
+        
+        return parts
+
+    async def _upload_file(self, file_block: FileBlock) -> Optional[File]:
+        """Upload a file to Gemini Files API and return File object."""
+        if not hasattr(self, 'client') or not self.client:
+            logger.warning("Gemini client not available for file upload")
+            raise ValueError("Gemini client not initialized for file upload")
+
+        try:
+            config = {"mime_type": file_block.media_type} if file_block.media_type else None
+            return await self.client.files.upload(file=file_block.get_file_like_object(), config=config)
+
+        except Exception as e:
+            logger.error(f"File upload failed: {e}")
+            raise ValueError("File upload failed")
+
     def _append_warning_message(
         self,
         current_native_messages: List[ContentOrDict],

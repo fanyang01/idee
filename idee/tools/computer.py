@@ -289,10 +289,11 @@ Note: On macOS, you may need to grant accessibility permissions to your terminal
             # Clean up
             screenshot_path.unlink(missing_ok=True)
             
-            return ToolResult(
-                output=f"Screenshot taken successfully",
-                base64_image=base64_image
-            )
+            # Create ToolResult with multimodal content
+            result = ToolResult()
+            result = result.add_text("Screenshot taken successfully")
+            result = result.add_image(base64_image, "image/png")
+            return result
             
         except Exception as e:
             screenshot_path.unlink(missing_ok=True)

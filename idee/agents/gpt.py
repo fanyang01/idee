@@ -1,8 +1,11 @@
 import asyncio
+import base64
 import logging
 import os
 import json
+import tempfile
 import time
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Union, cast
 
 # Use v1 OpenAI library structure
@@ -42,7 +45,8 @@ from .types import (
     UnifiedToolResult,
     Role,
 )
-from ..tools.base import BaseTool
+from ..tools.base import BaseTool, ToolResult, TextBlock, ContentBlock, FileBlock, ImageBlock, AudioBlock, VideoBlock, DocumentBlock
+from ..tools.media_utils import detect_media_type, read_file_as_base64
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +96,7 @@ class GPTAgent(BaseAgent):
                 formatted_tools.append(FunctionToolParam(
                     type="function",
                     name=tool_def.name,
-                    parameters=tool_def.parameters,
+                    parameters=tool_def.input_schema,
                     description=tool_def.description,
                     strict=tool_def.strict,
                 ))
@@ -308,24 +312,36 @@ class GPTAgent(BaseAgent):
 
         return assistant_text, tool_calls, None
 
-    def _format_tool_results(
+    async def _format_tool_results(
         self,
         tool_results: List[UnifiedToolResult]
-    ) -> List[Dict[str, Any]]: # Returns list of ChatCompletionToolMessageParam or Response formatted messages
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]: # Returns (tool_messages, follow_up_content)
         """
         Formats tool execution results into the appropriate message format.
         
         For ChatCompletion API: Uses "role": "tool" format
         For Response API: Uses "type": "function_call_output" format
+        
+        Returns tuple of (formatted_tool_results, follow_up_content_messages)
         """
         formatted_results = []
+        follow_up_content = []
+        
         for result in tool_results:
             try:
-                # Ensure output is JSON serializable string
-                if isinstance(result.tool_output, (dict, list)):
-                    content = json.dumps(result.tool_output)
+                # Handle multimodal content by converting to text with placeholders
+                if result.has_multimodal_content():
+                    content, follow_up_data = result.to_simple_format_with_placeholders()
+                    if follow_up_data:
+                        follow_up_content.append(follow_up_data)
                 else:
-                    content = str(result.tool_output) # Convert other types to string
+                    # For simple tool output
+                    if isinstance(result.tool_output, ToolResult):
+                        content = result.tool_output.get_text_content()
+                    elif isinstance(result.tool_output, (dict, list)):
+                        content = json.dumps(result.tool_output)
+                    else:
+                        content = str(result.tool_output) # Convert other types to string
                 
                 if self.config.use_responses_api:
                     # Format for Response API
@@ -357,7 +373,7 @@ class GPTAgent(BaseAgent):
                          "content": f"Error formatting tool result: {e}",
                      })
 
-        return formatted_results
+        return formatted_results, follow_up_content
 
     def _verify_tool_included(self, api_tools: List[Dict[str, Any]], summary_tool_name: str) -> bool:
         """
@@ -399,7 +415,7 @@ class GPTAgent(BaseAgent):
             else:
                 logger.warning("No choices found in ChatCompletion response to append.")
 
-    def _append_tool_results(
+    async def _append_tool_results(
         self,
         current_native_messages: List[Dict[str, Any]],
         tool_results: List[UnifiedToolResult]
@@ -412,7 +428,7 @@ class GPTAgent(BaseAgent):
             current_native_messages: The list of native format messages to append to
             tool_results: The unified tool results to format and append
         """
-        formatted_results = self._format_tool_results(tool_results)
+        formatted_results, follow_up_content = await self._format_tool_results(tool_results)
         
         if not formatted_results:
             logger.warning("No formatted tool results to append to native messages.")
@@ -428,7 +444,212 @@ class GPTAgent(BaseAgent):
             for result in formatted_results:
                 current_native_messages.append(result)
             logger.debug(f"Appended {len(formatted_results)} tool messages to native messages.")
+        
+        # Add follow-up media messages for multimodal content
+        if follow_up_content:
+            await self._append_follow_up_content(current_native_messages, follow_up_content)
 
+    async def _append_follow_up_content(
+        self,
+        current_native_messages: List[Dict[str, Any]],
+        follow_up_content: List[Dict[str, Any]]
+    ) -> None:
+        """
+        Append a single follow-up user message containing all multimedia content.
+        Uses overall placeholder approach for better content organization.
+        """
+        if not follow_up_content:
+            return
+            
+        # Determine text type and processing method based on API
+        if self.config.use_responses_api:
+            text_type = "input_text"
+            process_method = self._process_multimodal_content_blocks_responses
+        else:
+            text_type = "text"
+            process_method = self._process_multimodal_content_blocks_chat
+        
+        # Build a single message containing all tool outputs
+        all_content_parts = []
+        for content_data in follow_up_content:
+            tool_name = content_data["tool_name"]
+            placeholder_id = content_data["id"]
+            full_content = content_data["full_content"]
+            
+            all_content_parts.append({
+                "type": text_type,
+                "text": f'<ToolOutput name="{tool_name}" id="{placeholder_id}">'
+            })
+            all_content_parts.extend(await process_method(full_content))
+            all_content_parts.append({
+                "type": text_type,
+                "text": '</ToolOutput>'
+            })
+        
+        message_content = {
+            "role": "user",
+            "content": all_content_parts,
+        }
+        
+        current_native_messages.append(message_content)
+        logger.debug(f"Appended single follow-up message containing {len(follow_up_content)} tool outputs.")
+    
+    async def _process_multimodal_content_blocks_responses(self, content_blocks: List[ContentBlock]) -> List[Dict[str, Any]]:
+        """Process content blocks for multimodal Responses API format."""
+        
+        content_parts = []
+        for block in content_blocks:
+            if isinstance(block, TextBlock):
+                content_parts.append({
+                    "type": "input_text",
+                    "text": block.text
+                })
+            elif isinstance(block, FileBlock):
+                # Try to upload file first
+                file_id = await self._upload_file(block)
+                if file_id:
+                    # Use OpenAI's input_file format for uploaded files
+                    content_parts.append({
+                        "type": "input_file",
+                        "file_id": file_id
+                    })
+                else:
+                    # Fallback to base64 for small images or use file_data for PDFs
+                    if block.media_type and block.media_type.startswith("image/"):
+                        # Try base64 for images
+                        try:
+                            data = block.get_base64_data()
+                            
+                            content_parts.append({
+                                "type": "input_image",
+                                "image_url": f"data:{block.media_type};base64,{data}"
+                            })
+                        except Exception as e:
+                            raise ValueError(f"Failed to process image file {block.filename or 'unnamed'}: {e}")
+                    elif block.filename and block.filename.lower().endswith('.pdf'):
+                        # Handle PDF files with file_data
+                        try:
+                            data = block.get_base64_data()
+                            
+                            content_parts.append({
+                                "type": "input_file",
+                                "filename": block.filename,
+                                "file_data": f"data:{block.media_type};base64,{data}"
+                            })
+                        except Exception as e:
+                            raise ValueError(f"Failed to process PDF file {block.filename or 'unnamed'}: {e}")
+                    else:
+                        # Unsupported file type
+                        raise ValueError(f"Unsupported file type for {block.filename or 'unnamed'}: {block.media_type}")
+            elif isinstance(block, ImageBlock) and block.source.get("type") == "base64":
+                content_parts.append({
+                    "type": "input_image",
+                    "image_url": f"data:{block.source['media_type']};base64,{block.source['data']}"
+                })
+            elif block:
+                raise ValueError(f"Unsupported content block type: {block.type} with media_type: {block.source.get('media_type', 'unknown')}")
+
+        return content_parts
+
+    async def _process_multimodal_content_blocks_chat(self, content_blocks: List[ContentBlock]) -> List[Dict[str, Any]]:
+        """Process content blocks for multimodal Chat Completions API format."""
+        
+        content_parts = []
+        for block in content_blocks:
+            if isinstance(block, TextBlock):
+                content_parts.append({
+                    "type": "text",
+                    "text": block.text
+                })
+            elif isinstance(block, FileBlock):
+                # Try to upload file first
+                file_id = await self._upload_file(block)
+                if file_id:
+                    # Use OpenAI's file format for uploaded files
+                    content_parts.append({
+                        "type": "file",
+                        "file": {
+                            "file_id": file_id
+                        }
+                    })
+                else:
+                    # Fallback to base64 for small images or use file_data for PDFs
+                    if block.media_type and block.media_type.startswith("image/"):
+                        # Try base64 for images
+                        try:
+                            data = block.get_base64_data()
+
+                            content_parts.append({
+                                "type": "image",
+                                "image_url": {
+                                    "url": f"data:{block.media_type};base64,{data}"
+                                }
+                            })
+                        except Exception as e:
+                            raise ValueError(f"Failed to process image file {block.filename or 'unnamed'}: {e}")
+                    elif block.filename and block.filename.lower().endswith('.pdf'):
+                        # Handle PDF files with file_data
+                        try:
+                            data = block.get_base64_data()
+                            
+                            content_parts.append({
+                                "type": "file",
+                                "file": {
+                                    "filename": block.filename,
+                                    "file_data": f"data:{block.media_type};base64,{data}"
+                                }
+                            })
+                        except Exception as e:
+                            raise ValueError(f"Failed to process PDF file {block.filename or 'unnamed'}: {e}")
+                    else:
+                        # Unsupported file type
+                        raise ValueError(f"Unsupported file type for {block.filename or 'unnamed'}: {block.media_type}")
+            elif isinstance(block, ImageBlock) and block.source.get("type") == "base64":
+                content_parts.append({
+                    "type": "image",
+                    "image_url": {
+                        "url": f"data:{block.source['media_type']};base64,{block.source['data']}"
+                    }
+                })
+            elif block:
+                raise ValueError(f"Unsupported content block type: {block.type} with media_type: {block.source.get('media_type', 'unknown')}")
+
+        return content_parts
+
+    async def _upload_file(self, file_block: FileBlock) -> Optional[str]:
+        """Upload a file to OpenAI Files API and return file ID."""
+        if not hasattr(self, 'client') or not self.client:
+            logger.warning("OpenAI client not available for file upload")
+            return None
+            
+        try:
+            # Prepare file content based on what's available
+            if file_block.file_path:
+                # Use existing file path directly
+                file_content = Path(file_block.file_path)
+            else:
+                # Use bytes content
+                file_content = file_block.get_bytes_content()
+                
+            # Create file with filename if available
+            if file_block.filename:
+                response = await self.client.files.create(
+                    file=(file_block.filename, file_content),
+                    purpose="assistants"
+                )
+            else:
+                response = await self.client.files.create(
+                    file=file_content,
+                    purpose="assistants"
+                )
+            
+            return response.id
+                
+        except Exception as e:
+            logger.error(f"OpenAI file upload failed: {e}")
+            return None
+
+    
     def _append_warning_message(
         self,
         current_native_messages: List[Dict[str, Any]],

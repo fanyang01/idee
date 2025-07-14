@@ -245,7 +245,7 @@ class BaseAgent(ABC):
         pass
         
     @abstractmethod
-    def _append_tool_results(
+    async def _append_tool_results(
         self,
         current_native_messages: List[Any],
         tool_results: List[UnifiedToolResult]
@@ -304,49 +304,43 @@ class BaseAgent(ABC):
         is_error = False
 
         logger.info(f"Executing tool '{tool_name}' with ID '{call_id}' and input: {tool_input}")
-        # Add to TUI: Display "Thinking: Executing tool X..."
 
         if tool_name not in self.tools:
             logger.error(f"Tool '{tool_name}' not found.")
-            output = f"Error: Tool '{tool_name}' is not available."
+            from idee.tools.base import ToolResult
+            tool_result = ToolResult(error=f"Error: Tool '{tool_name}' is not available.")
             is_error = True
         else:
             # Get the already instantiated tool
             tool = self.tools[tool_name]
             try:
-                # TODO: Add input validation against tool's args_schema if implemented
-                # The tool instance already has its dependencies (like history_db)
                 tool_result = await tool.run(**tool_input)
                 
                 if tool_result.error:
                     logger.error(f"Tool '{tool_name}' (ID: {call_id}) execution error: {tool_result.error}")
-                    output = tool_result.error
                     is_error = True
                 else:
-                    output = tool_result.output
                     logger.info(f"Tool '{tool_name}' (ID: {call_id}) executed successfully.")
+                    is_error = False
 
             except ToolError as e:
                 logger.error(f"Tool '{tool_name}' (ID: {call_id}) execution error: {e}")
-                output = f"Error executing tool '{tool_name}': {e}"
+                from idee.tools.base import ToolResult
+                tool_result = ToolResult(error=f"Error executing tool '{tool_name}': {e}")
                 is_error = True
             except Exception as e:
                 logger.exception(f"Unexpected error executing tool '{tool_name}' (ID: {call_id}): {e}")
-                output = f"Unexpected error executing tool '{tool_name}': {e}"
+                from idee.tools.base import ToolResult
+                tool_result = ToolResult(error=f"Unexpected error executing tool '{tool_name}': {e}")
                 is_error = True
 
         latency_ms = (time.monotonic() - start_time) * 1000
         logger.debug(f"Tool '{tool_name}' (ID: {call_id}) execution time: {latency_ms:.2f} ms")
-        # Add to TUI: Display tool result or error
 
-        # Record tool execution in history DB? Maybe optional.
-
-        # Create UnifiedToolResult - if we got a base64_image or system message from a ToolResult,
-        # we might want to include these in the UnifiedToolResult in future iterations
         return UnifiedToolResult(
             call_id=call_id,
             tool_name=tool_name,
-            tool_output=output,
+            tool_output=tool_result,
             is_error=is_error,
         )
 
@@ -439,7 +433,7 @@ class BaseAgent(ABC):
             )
 
             # 5. Format tool results for next API call (API-specific implementation)
-            self._append_tool_results(current_native_messages, tool_results)
+            await self._append_tool_results(current_native_messages, tool_results)
 
             # Add UnifiedMessage for tool results
             tool_result_message = UnifiedMessage(
